@@ -1,0 +1,12 @@
+{
+  "_comment": "Example only. The real profile.json is generated on first run from your resume PDF and is gitignored, because it contains your resume text verbatim.",
+  "name": "Jane Doe",
+  "years_experience": 2.0,
+  "seniority": "junior",
+  "skills": ["sql", "python", "power bi", "tableau", "excel", "pandas"],
+  "domains": ["business intelligence", "marketing analytics"],
+  "strengths": ["dashboard design", "stakeholder reporting"],
+  "target_titles": ["data analyst", "bi analyst", "reporting analyst"],
+  "_resume_fingerprint": "md5-of-the-pdf-goes-here",
+  "_resume_text": "(full resume text is cached here at runtime — this is why the real file is gitignored)"
+}
