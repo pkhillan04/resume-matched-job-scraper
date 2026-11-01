@@ -1,0 +1,21 @@
+# Personal data — never commit
+*.pdf
+resume.pdf
+profile.json
+seen_jobs.json
+.env
+
+# Generated output
+*.xlsx
+naukri_jobs_*.xlsx
+tailored_pitches/
+applied_log.csv
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# OS
+.DS_Store
