@@ -80,6 +80,18 @@ falls back to `keyword` automatically when quota runs out.
 `profile.example.json` shows the profile shape. The real `profile.json` is
 gitignored because it caches your resume text verbatim.
 
+## Tests
+
+```bash
+python3 -m unittest discover -s . -p "test_*.py"
+```
+
+The tests cover the pure helpers every scraped job passes through before any
+network call: freshness parsing and URL normalization. They need no browser, no
+network and no API key -- `job_scraper.py` imports cleanly without Playwright or
+the Gemini SDK installed, and `require_deps()` checks for whatever the
+configured run actually needs when `main()` starts.
+
 ## Honest limits
 
 - **Selectors break.** Four job boards change their markup whenever they like.

@@ -117,31 +117,74 @@ CONFIG = {
 # ============================================================================
 # DEPS
 # ============================================================================
+# Third-party imports are recorded rather than fatal. The pure helpers in this
+# module (freshness parsing, dedup keys, the relevance gate, scoring) are plain
+# stdlib, so keeping the imports non-fatal means the module can be imported --
+# and unit-tested -- on a machine that has no Playwright or Gemini SDK. A real
+# run still fails fast with install instructions: require_deps() does that check
+# at the top of main(), before any scraping starts.
+_MISSING_DEPS = []
+
 try:
     from playwright.async_api import async_playwright
+except ImportError:
+    async_playwright = None
+    _MISSING_DEPS.append("playwright")
+
+try:
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+except ImportError:
+    Workbook = Font = PatternFill = Alignment = Border = Side = None
+    _MISSING_DEPS.append("openpyxl")
+
+try:
     from pypdf import PdfReader
-except ImportError as e:
-    print(f"\n❌ Missing: {e.name}")
-    print("Install:  pip3 install playwright openpyxl pypdf")
-    print("Then:     python3 -m playwright install chromium")
+except ImportError:
+    PdfReader = None
+    _MISSING_DEPS.append("pypdf")
+
+try:
+    import requests
+except ImportError:
+    requests = None
+    _MISSING_DEPS.append("requests")
+
+try:
+    from bs4 import BeautifulSoup
+except ImportError:
+    BeautifulSoup = None
+    _MISSING_DEPS.append("beautifulsoup4")
+
+try:
+    from google import genai
+except ImportError:
+    genai = None
+    _MISSING_DEPS.append("google-genai")
+
+
+def require_deps():
+    """Exit with install instructions if a package THIS run needs is missing.
+
+    Which packages are required depends on CONFIG: requests/beautifulsoup4 only
+    matter when LinkedIn is enabled, google-genai only in gemini analyzer mode.
+    A package that is missing but unused for the configured run is not an error.
+    """
+    needed = {"playwright", "openpyxl", "pypdf"}
+    if CONFIG.get("include_linkedin"):
+        needed |= {"requests", "beautifulsoup4"}
+    if CONFIG.get("analyzer") == "gemini":
+        needed.add("google-genai")
+
+    missing = sorted(p for p in _MISSING_DEPS if p in needed)
+    if not missing:
+        return
+
+    print(f"\n❌ Missing packages: {', '.join(missing)}")
+    print(f"Install:  pip3 install {' '.join(missing)}")
+    if "playwright" in missing:
+        print("Then:     python3 -m playwright install chromium")
     sys.exit(1)
-
-if CONFIG["analyzer"] == "gemini":
-    try:
-        from google import genai
-    except ImportError:
-        print("❌ Gemini mode needs:  pip3 install google-genai")
-        sys.exit(1)
-
-if CONFIG.get("include_linkedin"):
-    try:
-        import requests
-        from bs4 import BeautifulSoup
-    except ImportError:
-        print("❌ LinkedIn mode needs:  pip3 install requests beautifulsoup4")
-        sys.exit(1)
 
 
 # ============================================================================
@@ -151,17 +194,23 @@ def parse_days_old(posted_text):
     """
     Parse Naukri's 'Posted X days ago' / 'Few hours ago' / 'Just now' text
     into an integer number of days. Returns None if unparseable.
+
+    The numeric "N day" pattern is matched BEFORE the "yesterday" shortcut on
+    purpose. The shortcut used to also test for the literal substring "1 day",
+    which is contained in "21 days ago", "11 days ago" and "31 days ago" -- so
+    month-old postings were read as one day old and sailed straight through the
+    max_days_old freshness filter. Matching the number first removes the overlap.
     """
     if not posted_text:
         return None
     t = posted_text.lower()
     if "just now" in t or "few hours" in t or "few minutes" in t or "today" in t:
         return 0
-    if "yesterday" in t or "1 day" in t:
-        return 1
     m = re.search(r"(\d+)\s*\+?\s*day", t)
     if m:
         return int(m.group(1))
+    if "yesterday" in t:
+        return 1
     m = re.search(r"(\d+)\s*\+?\s*hour", t)
     if m:
         return 0
@@ -1211,6 +1260,8 @@ def write_excel(jobs, output_path, tailor_url, profile):
 # MAIN
 # ============================================================================
 async def main():
+    require_deps()
+
     print("=" * 60)
     print(f"Naukri Resume-Aware Scraper · Analyzer: {CONFIG['analyzer']}")
     print("=" * 60)
