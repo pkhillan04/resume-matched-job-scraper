@@ -87,8 +87,12 @@ python3 -m unittest discover -s . -p "test_*.py"
 ```
 
 The tests cover the pure helpers every scraped job passes through before any
-network call: freshness parsing and URL normalization. They need no browser, no
-network and no API key -- `job_scraper.py` imports cleanly without Playwright or
+network call: freshness parsing, URL normalization, and the per-source dedup
+keys (LinkedIn job ID, Indeed `jk`, ZipRecruiter posting ID). The dedup tests
+also pin down the invariant that matters most there -- the key built at scrape
+time and the key rebuilt from `seen_jobs.json` must be identical for one
+posting, or a job already shown comes back on every run. They need no browser,
+no network and no API key -- `job_scraper.py` imports cleanly without Playwright or
 the Gemini SDK installed, and `require_deps()` checks for whatever the
 configured run actually needs when `main()` starts.
 

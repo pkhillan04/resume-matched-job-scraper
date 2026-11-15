@@ -249,22 +249,50 @@ def linkedin_dedup_key(url):
     return normalize_job_url(url)
 
 
+# A jk is an opaque per-posting token. In practice Indeed serves 16 lowercase
+# hex characters, but nothing guarantees that: data-jk is read straight off the
+# page, and treating the token as hex-only was wrong in two ways that both broke
+# dedup (see test_dedup_keys.py for the regression tests).
+#
+#   1. The old URL pattern [0-9a-fA-F]+ was unanchored, so "jk=abz123" matched
+#      only the leading "ab" -- distinct postings sharing a hex prefix collapsed
+#      onto one key and every one after the first was silently dropped as a
+#      duplicate. A jk starting with a non-hex character matched nothing at all,
+#      so the fallback stripped the query and EVERY such job collapsed onto the
+#      single key "https://in.indeed.com/viewjob".
+#   2. The bare-jk and URL branches disagreed for the same token: the scraper
+#      keys a fresh job on the bare data-jk while load_seen_jobs() keys the
+#      stored apply_link URL, so a non-hex jk produced two different keys for
+#      one posting and the job was re-shown on every run.
+#
+# Matching the whole token fixes both. Case is preserved rather than lowercased:
+# if Indeed ever serves a case-sensitive token, folding case would merge two
+# genuinely different postings, which loses a job -- the worse failure.
+_INDEED_JK_CHARS = r"[0-9A-Za-z_-]+"
+_INDEED_BARE_JK_RE = re.compile(rf"{_INDEED_JK_CHARS}\Z")
+_INDEED_URL_JK_RE = re.compile(rf"[?&]jk=({_INDEED_JK_CHARS})")
+
+
 def indeed_dedup_key(url_or_jk):
     """Stable dedup key for an Indeed job, based on its 'jk' job key.
 
     Indeed links vary (/viewjob?jk=, /rc/clk?jk=, /pagead/...&jk=) and carry
     rotating tracking params, but the jk value is the stable per-posting ID.
     Accepts either a raw jk or any Indeed URL containing jk=, and canonicalizes
-    to one form. Falls back to URL normalization if no jk is found.
+    both to one form so the scrape-time key and the key rebuilt from the seen
+    file always agree. Falls back to URL normalization if no jk is found.
     """
     if not url_or_jk:
         return ""
-    if re.fullmatch(r"[0-9a-fA-F]+", url_or_jk):        # already a bare jk
-        return f"https://in.indeed.com/viewjob?jk={url_or_jk}"
-    m = re.search(r"[?&]jk=([0-9a-fA-F]+)", url_or_jk)
+    token = url_or_jk.strip()
+    # No URL can fullmatch the jk charset (it has no ':' '/' '?' or '.'), so an
+    # exact match here means the caller handed us a raw jk.
+    if _INDEED_BARE_JK_RE.fullmatch(token):
+        return f"https://in.indeed.com/viewjob?jk={token}"
+    m = _INDEED_URL_JK_RE.search(token)
     if m:
         return f"https://in.indeed.com/viewjob?jk={m.group(1)}"
-    return normalize_job_url(url_or_jk)
+    return normalize_job_url(token)
 
 
 def ziprecruiter_dedup_key(url):
