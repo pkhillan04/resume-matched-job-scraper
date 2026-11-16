@@ -31,6 +31,7 @@ import json
 import time
 import hashlib
 import asyncio
+import functools
 from datetime import datetime
 
 # ============================================================================
@@ -321,10 +322,45 @@ def ziprecruiter_location_ok(loc_text):
     allow = CONFIG.get("ziprecruiter_location_allow")
     if not allow:
         return True
-    t = (loc_text or "").lower()
+    t = (loc_text or "").strip().lower()
     if not t:
-        return True   # no location text → don't over-filter, let relevance/score decide
+        # No location text → don't over-filter, let relevance/score decide.
+        # .strip() matters: the text comes out of the DOM, so an absent
+        # location usually arrives as padding or a newline rather than as a
+        # clean empty string, and an unstripped check dropped those jobs.
+        return True
     return any(a in t for a in allow)
+
+
+# Short terms keep strict whole-word matching: "mis" must not match "miss" or
+# "dismissal", and a 2-3 character term is almost always an abbreviation whose
+# plural is not a real job title.
+_TITLE_PLURAL_MIN_LEN = 4
+
+
+@functools.lru_cache(maxsize=512)
+def _title_term_re(term):
+    """Compile the whole-word matcher for one single-word title keyword.
+
+    A plain ``\\b<term>\\b`` got two cases wrong, and both of them failed
+    silently in the direction that loses jobs:
+
+    * Plural titles. A posting hiring for several seats titles the role in the
+      plural ("Business Analysts — 3 positions"), which never matched the
+      singular keep-term, so the whole posting was gated out. The same gap let
+      a plural drop-term ("Analytics Managers") past the drop-list. Terms of
+      at least _TITLE_PLURAL_MIN_LEN characters now tolerate a trailing "s".
+    * Terms that begin or end in punctuation. ``\\b`` needs a word character
+      on its side of the boundary, so a config term like "c++" could never
+      match anything at all. The boundary is now only applied on the sides
+      that actually have a word character.
+    """
+    body = re.escape(term)
+    if len(term) >= _TITLE_PLURAL_MIN_LEN and term[-1].isalnum():
+        body += "s?"
+    lead = r"\b" if term[:1].isalnum() or term[:1] == "_" else ""
+    trail = r"\b" if term[-1:].isalnum() or term[-1:] == "_" else ""
+    return re.compile(f"{lead}{body}{trail}")
 
 
 def passes_relevance(title):
@@ -344,7 +380,7 @@ def passes_relevance(title):
         term = term.lower()
         if " " in term:                      # multi-word → substring is fine
             return term in t
-        return re.search(rf"\b{re.escape(term)}\b", t) is not None   # whole word
+        return _title_term_re(term).search(t) is not None   # whole word
 
     if not any(has(k) for k in CONFIG.get("title_keep", [])):
         return False
