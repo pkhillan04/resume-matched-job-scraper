@@ -338,6 +338,20 @@ def ziprecruiter_location_ok(loc_text):
 _TITLE_PLURAL_MIN_LEN = 4
 
 
+def _bounded(body, term):
+    """Wrap an escaped pattern in word boundaries, but only where one works.
+
+    ``\\b`` needs a word character on its side of the boundary, so a plain
+    ``\\bc\\+\\+\\b`` can never match anything at all: the boundary after "+"
+    demands a word character that "c++" does not have. Any term beginning or
+    ending in punctuation was therefore invisible to the matcher. The boundary
+    is applied only on the sides that actually have a word character.
+    """
+    lead = r"\b" if term[:1].isalnum() or term[:1] == "_" else ""
+    trail = r"\b" if term[-1:].isalnum() or term[-1:] == "_" else ""
+    return f"{lead}{body}{trail}"
+
+
 @functools.lru_cache(maxsize=512)
 def _title_term_re(term):
     """Compile the whole-word matcher for one single-word title keyword.
@@ -350,17 +364,36 @@ def _title_term_re(term):
       singular keep-term, so the whole posting was gated out. The same gap let
       a plural drop-term ("Analytics Managers") past the drop-list. Terms of
       at least _TITLE_PLURAL_MIN_LEN characters now tolerate a trailing "s".
-    * Terms that begin or end in punctuation. ``\\b`` needs a word character
-      on its side of the boundary, so a config term like "c++" could never
-      match anything at all. The boundary is now only applied on the sides
-      that actually have a word character.
+    * Terms that begin or end in punctuation — see _bounded().
     """
     body = re.escape(term)
     if len(term) >= _TITLE_PLURAL_MIN_LEN and term[-1].isalnum():
         body += "s?"
-    lead = r"\b" if term[:1].isalnum() or term[:1] == "_" else ""
-    trail = r"\b" if term[-1:].isalnum() or term[-1:] == "_" else ""
-    return re.compile(f"{lead}{body}{trail}")
+    return re.compile(_bounded(body, term))
+
+
+@functools.lru_cache(maxsize=512)
+def _skill_term_re(term):
+    """Compile the whole-word matcher for one skill or tool name.
+
+    Same boundary handling as _title_term_re, but without the plural
+    tolerance: a trailing "s" on a title is another seat for the same role,
+    while on a skill it is usually a different word ("excel" vs "excels at").
+    """
+    return re.compile(_bounded(re.escape(term), term))
+
+
+def title_has_term(title, term):
+    """Does ``title`` contain ``term``, matching single words whole?
+
+    Shared by the relevance gate and the scorer so the two cannot drift. A
+    multi-word term is a substring check, since its own spaces already keep it
+    from matching inside another word.
+    """
+    term = term.lower()
+    if " " in term:
+        return term in title
+    return _title_term_re(term).search(title) is not None
 
 
 def passes_relevance(title):
@@ -377,10 +410,7 @@ def passes_relevance(title):
     t = (title or "").lower()
 
     def has(term):
-        term = term.lower()
-        if " " in term:                      # multi-word → substring is fine
-            return term in t
-        return _title_term_re(term).search(t) is not None   # whole word
+        return title_has_term(t, term)
 
     if not any(has(k) for k in CONFIG.get("title_keep", [])):
         return False
@@ -1067,6 +1097,19 @@ async def scrape_ziprecruiter_listings(keyword, location, max_jobs, seen_urls, m
 # ============================================================================
 # MATCHING (against the cached profile)
 # ============================================================================
+# Title terms the scorer reacts to. These are matched with title_has_term(),
+# i.e. whole words for single-word terms. A bare substring check read
+# "Internal Reporting Analyst" as an internship (-30 and a false red flag),
+# "Analyst, Headquarters Finance" as a head-of role (-18), and any title
+# containing "mis" ("Misconduct") as an MIS role (+12).
+TARGET_TITLE_TELLS = ["data analyst", "business analyst", "bi analyst",
+                      "analytics", "reporting analyst", "mis"]
+SENIOR_TITLE_TELLS = ["senior", "sr.", "sr ", "lead", "principal", "head",
+                      "manager"]
+# "intern" alone would miss "Internship", which _title_term_re's optional
+# trailing "s" does not cover.
+INTERN_TITLE_TELLS = ["intern", "internship"]
+
 DATA_ENGINEER_TELLS = ["spark", "hadoop", "kafka", "scala", "airflow", "data pipeline engineering"]
 ML_ENGINEER_TELLS = ["tensorflow", "pytorch", "deep learning", "mlops", "model deployment"]
 DEV_TELLS = ["react", "node.js", "frontend", "backend", "microservices", "java spring"]
@@ -1078,9 +1121,9 @@ def match_keyword(job, profile):
     skills = profile["skills"]
     yoe = profile["years_experience"]
 
-    matched = [s for s in skills if re.search(rf"\b{re.escape(s)}\b", jd_text)]
+    matched = [s for s in skills if _skill_term_re(s).search(jd_text)]
     anti = [s for s in (DATA_ENGINEER_TELLS + ML_ENGINEER_TELLS + DEV_TELLS)
-            if re.search(rf"\b{re.escape(s)}\b", jd_text)]
+            if _skill_term_re(s).search(jd_text)]
 
     # Score = how well the candidate covers the skills THIS JD actually asks for.
     # We look for a broad set of data-analyst skills in the JD, then check
@@ -1094,7 +1137,7 @@ def match_keyword(job, profile):
                    "regression", "hypothesis testing", "a/b testing",
                    "predictive modelling", "predictive modeling",
                    "customer segmentation", "data storytelling"]
-    jd_wants = [s for s in da_universe if re.search(rf"\b{re.escape(s)}\b", jd_text)]
+    jd_wants = [s for s in da_universe if _skill_term_re(s).search(jd_text)]
     cand_has = [s for s in jd_wants if s in skills]
 
     if jd_wants:
@@ -1109,12 +1152,12 @@ def match_keyword(job, profile):
     score -= len(anti) * 10
 
     title = job["title"].lower()
-    if any(t in title for t in ["data analyst", "business analyst", "bi analyst",
-                                  "analytics", "reporting analyst", "mis"]):
+    is_intern = any(title_has_term(title, t) for t in INTERN_TITLE_TELLS)
+    if any(title_has_term(title, t) for t in TARGET_TITLE_TELLS):
         score += 12
-    if any(t in title for t in ["senior", "sr.", "sr ", "lead", "principal", "head", "manager"]):
+    if any(title_has_term(title, t) for t in SENIOR_TITLE_TELLS):
         score -= 18
-    if "intern" in title:
+    if is_intern:
         score -= 30
 
     exp_text = job.get("experience", "").lower()
@@ -1125,7 +1168,12 @@ def match_keyword(job, profile):
             score -= 20
         elif lo <= yoe <= hi + 1:
             score += 8
-    if "not disclosed" not in job.get("salary", "").lower():
+    # An absent salary is not a disclosed one. LinkedIn and ZipRecruiter
+    # postings often carry no salary field at all, and scoring "" as disclosed
+    # handed them a free +5 over Naukri postings that honestly say
+    # "Not disclosed".
+    salary_text = (job.get("salary") or "").strip().lower()
+    if salary_text and "not disclosed" not in salary_text:
         score += 5
 
     score = max(0, min(100, score))
@@ -1133,7 +1181,7 @@ def match_keyword(job, profile):
     common = ["sql", "python", "tableau", "power bi", "r", "looker", "snowflake",
               "bigquery", "dbt", "airflow", "spark", "a/b testing", "statistics",
               "machine learning", "google analytics", "advanced excel"]
-    jd_skills = [s for s in common if re.search(rf"\b{re.escape(s)}\b", jd_text)]
+    jd_skills = [s for s in common if _skill_term_re(s).search(jd_text)]
     gaps = [s for s in jd_skills if s not in skills][:4]
 
     if score >= 80:
@@ -1148,7 +1196,7 @@ def match_keyword(job, profile):
     flags = []
     if anti:
         flags.append(f"Mentions {', '.join(anti[:2])} (different role)")
-    if "intern" in title:
+    if is_intern:
         flags.append("Internship — below target level")
     if m and int(m.group(1)) > yoe + 2:
         flags.append(f"Wants {m.group(0)}y — too senior")
