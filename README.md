@@ -87,8 +87,10 @@ python3 -m unittest discover -s . -p "test_*.py"
 ```
 
 The tests cover the pure helpers every scraped job passes through before any
-network call: freshness parsing, URL normalization, and the per-source dedup
-keys (LinkedIn job ID, Indeed `jk`, ZipRecruiter posting ID). The dedup tests
+network call: freshness parsing, URL normalization, the per-source date parsers
+(LinkedIn's `<time datetime>` attribute, ZipRecruiter's relative-or-absolute
+`jobList-date`), the keyword scorer, and the per-source dedup keys (LinkedIn job
+ID, Indeed `jk`, ZipRecruiter posting ID). The dedup tests
 also pin down the invariant that matters most there -- the key built at scrape
 time and the key rebuilt from `seen_jobs.json` must be identical for one
 posting, or a job already shown comes back on every run. They need no browser,

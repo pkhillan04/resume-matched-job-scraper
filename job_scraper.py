@@ -205,7 +205,9 @@ def parse_days_old(posted_text):
     if not posted_text:
         return None
     t = posted_text.lower()
-    if "just now" in t or "few hours" in t or "few minutes" in t or "today" in t:
+    # "just now" / "just posted", "a few hours ago", "an hour ago", "today".
+    # The article forms carry no digit, so the numeric branches below miss them.
+    if re.search(r"just\b|few hours|few minutes|an hour|a minute", t) or "today" in t:
         return 0
     m = re.search(r"(\d+)\s*\+?\s*day", t)
     if m:
@@ -213,6 +215,11 @@ def parse_days_old(posted_text):
     if "yesterday" in t:
         return 1
     m = re.search(r"(\d+)\s*\+?\s*hour", t)
+    if m:
+        return 0
+    # ZipRecruiter counts the first hour in minutes ("20 minutes ago"), which
+    # only "few minutes" above used to catch.
+    m = re.search(r"(\d+)\s*\+?\s*min", t)
     if m:
         return 0
     m = re.search(r"(\d+)\s*\+?\s*week", t)
@@ -963,26 +970,49 @@ ZIPRECRUITER_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
 
 
 def _zr_parse_date(text):
-    """ZR shows dates like '14 Jun' or '2 days ago' → integer days old (or None)."""
+    r"""ZipRecruiter's 'Posted' text -> integer days old (or None if unreadable).
+
+    Relative phrasings ('2 days ago', '30+ days ago', '3 weeks ago') are handed
+    to parse_days_old(), which already covers every variant Naukri shows and is
+    tested in test_helpers.py. What ZipRecruiter adds, and Naukri never shows,
+    is an absolute calendar date -- '14 Jun', sometimes with a year -- so that
+    is all this function parses itself.
+
+    Three ZR phrasings used to fall through to None here. Because an unknown
+    age is deliberately let through (see the comment at the end of
+    parse_days_old), each one put month-old postings in the sheet as if they
+    were fresh:
+
+      * '30+ days ago' -- the old regex was r"(\d+)\s*day", with nothing to
+        match the '+' sitting between the number and the word;
+      * '2 weeks ago' / '3 months ago' -- there was no week or month branch;
+      * '14 Dec' read in January -- stamped with the *current* year, which put
+        the date in the future and scored a near-year-old posting at about
+        -350 days, comfortably under any freshness limit. A bare '%d %b' date
+        that lands more than a day ahead of today is now rolled back a year.
+    """
     if not text:
         return None
-    t = text.strip().lower()
-    m = re.search(r"(\d+)\s*day", t)
-    if m:
-        return int(m.group(1))
-    if "today" in t or "hour" in t or "just" in t or "min" in t:
-        return 0
-    if "yesterday" in t:
-        return 1
+
+    days = parse_days_old(text)
+    if days is not None:
+        return days
+
+    today = datetime.now().date()
     for fmt in ("%d %b %Y", "%d %b"):
         try:
-            d = datetime.strptime(text.strip(), fmt)
-            if fmt == "%d %b":
-                d = d.replace(year=datetime.now().year)
-            return (datetime.now().date() - d.date()).days
+            d = datetime.strptime(text.strip(), fmt).date()
         except ValueError:
             continue
-    return None
+        if fmt == "%d %b":
+            # strptime defaults to 1900; the date is this year unless that
+            # would make it a future posting, in which case it is last year's.
+            d = d.replace(year=today.year)
+            if (d - today).days > 1:
+                d = d.replace(year=today.year - 1)
+        return (today - d).days
+
+    return None  # unreadable -- let the job through rather than lose it
 
 
 async def scrape_ziprecruiter_listings(keyword, location, max_jobs, seen_urls, max_days_old):
