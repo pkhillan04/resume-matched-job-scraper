@@ -427,13 +427,34 @@ def passes_relevance(title):
 
 
 def load_seen_jobs(path):
-    """Load the set of already-shown job URLs from disk."""
+    """Load the set of already-shown job URLs from disk.
+
+    Fails open: a missing, unreadable or malformed file yields an empty set
+    rather than an exception. Losing the dedup history re-shows old jobs, which
+    is annoying; raising here aborts the whole run before a single job is
+    scraped, which is worse. The try/except already covered unparseable JSON,
+    but two malformed-but-parseable shapes still crashed or silently emptied
+    past it — see the two guards below, and test_seen_jobs.py for the
+    regression tests.
+    """
     if not os.path.exists(path):
         return set()
     try:
         with open(path) as f:
             data = json.load(f)
-        seen = set(data.get("seen_urls", []))
+        # A bare JSON array is read as a list of URLs. The shape is
+        # unambiguous, and the alternative — data.get() raising AttributeError
+        # into the except below — silently discards the entire dedup history.
+        raw = data if isinstance(data, list) else data.get("seen_urls", [])
+        # Keep only strings. A null or number in seen_urls (a hand edit, a
+        # truncated write patched by hand, any other producer) used to reach
+        # the migration loop below and kill the run with "TypeError: argument
+        # of type 'NoneType' is not iterable" — that loop sits outside this
+        # try/except, so the fail-open promise above did not actually hold.
+        # Non-strings cannot be job URLs, so dropping them loses nothing. This
+        # also protects save_seen_jobs(), whose sorted() raises on a set that
+        # mixes None with str.
+        seen = {u for u in raw if isinstance(u, str)}
     except Exception:
         return set()
     # One-time migration: earlier runs stored LinkedIn jobs by full URL, whose
@@ -459,11 +480,22 @@ def save_seen_jobs(path, seen_set):
         "total_seen": len(seen_set),
     }
     tmp = f"{path}.tmp"
-    with open(tmp, "w") as f:
-        json.dump(payload, f, indent=2)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, path)   # atomic on the same filesystem
+    try:
+        with open(tmp, "w") as f:
+            json.dump(payload, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)   # atomic on the same filesystem
+    except Exception:
+        # Don't leave the partial temp file behind. The real file is untouched
+        # either way — os.replace is the only thing that publishes it — but a
+        # stale .tmp sitting next to seen_jobs.json looks like real state and
+        # invites recovering the half-written version from it.
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
 
 
 # ============================================================================
